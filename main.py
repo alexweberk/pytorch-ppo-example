@@ -104,7 +104,7 @@ class PPOAgent:
         for reward, done in zip(self.memory.rewards[::-1], self.memory.dones[::-1]):
             discounted_reward = reward + self.gamma * (1-done) * discounted_reward
             returns.append(discounted_reward)
-        returns = torch.tensor(returns[::-1]).view(-1, 1).to(self.device) # [update_timesteps, 1]
+        returns = torch.FloatTensor(returns[::-1]).view(-1, 1).to(self.device) # [update_timesteps, 1]
         returns = (returns - returns.mean()) / (returns.std() + 1e-5)
 
         for _ in range(self.k_epoch):
