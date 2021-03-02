@@ -22,14 +22,16 @@ class Memory:
         self.rewards = []
         self.dones = []
         self.logprobs = []
+        self.values = []
 
     def add(self, experience):
-        state, action, reward, done, logprob = experience
+        state, action, reward, done, logprob, value = experience
         self.states.append(state)
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
         self.logprobs.append(logprob)
+        self.values.append(value)
 
 class ActorCritic(nn.Module):
     def __init__(self, n_input, n_output, n_hidden):
@@ -56,7 +58,8 @@ class ActorCritic(nn.Module):
             dist = Categorical(action_probs)
             action = dist.sample()
             logprob = dist.log_prob(action)
-            return action.item(), logprob
+            state_value = self.critic(state)
+            return action.item(), logprob, state_value
 
     def evaluate(self, states, actions):
         action_probs = self.actor(states)
@@ -67,9 +70,10 @@ class ActorCritic(nn.Module):
 
 class PPOAgent:
     def __init__(self, n_state, n_action, n_hidden,
-                    gamma=1.0, lr=1e-3, eps_clip=0.2, k_epoch=4,
+                    gamma=1.0, gae_lambda=0.95, lr=1e-3, eps_clip=0.2, k_epoch=4,
                     value_weight=0.5, entropy_weight=0.01):
         self.gamma = gamma
+        self.gae_lambda = gae_lambda
         self.eps_clip = eps_clip
         self.k_epoch = k_epoch
         self.value_weight = value_weight
@@ -95,17 +99,30 @@ class PPOAgent:
         return self.model.act(state)
 
     def update(self):
-        states_old = torch.tensor(self.memory.states).float().to(self.device)
-        actions_old = torch.tensor(self.memory.actions).to(self.device)
-        logprobs_old = torch.tensor(self.memory.logprobs).view(-1, 1).to(self.device) # [update_timesteps, 1]
+        states_old = torch.tensor(self.memory.states).float().to(self.device)[:-1]
+        actions_old = torch.tensor(self.memory.actions).to(self.device)[:-1]
+        logprobs_old = torch.tensor(self.memory.logprobs).view(-1, 1).to(self.device)[:-1] # [update_timesteps, 1]
 
+        rewards = self.memory.rewards[:-1]
+        dones = self.memory.dones[:-1]
+        values = self.memory.values
         returns = []
-        discounted_reward = 0.0
-        for reward, done in zip(self.memory.rewards[::-1], self.memory.dones[::-1]):
-            discounted_reward = reward + self.gamma * (1-done) * discounted_reward
-            returns.append(discounted_reward)
-        returns = torch.FloatTensor(returns[::-1]).view(-1, 1).to(self.device) # [update_timesteps, 1]
+        gae = 0.0
+        for i in reversed(range(len(rewards))):
+            delta = rewards[i] + self.gamma * self.memory.values[i+1] * (1-dones[i]) - self.memory.values[i]
+            gae = delta + self.gamma * self.gae_lambda * (1-dones[i]) * gae
+            advantage = gae + values[i]
+            returns.append(advantage)
+        returns = torch.tensor(returns[::-1]).view(-1, 1).to(self.device)
         returns = (returns - returns.mean()) / (returns.std() + 1e-5)
+
+        # returns = []
+        # discounted_reward = 0.0
+        # for reward, done in zip(self.memory.rewards[::-1], self.memory.dones[::-1]):
+        #     discounted_reward = reward + self.gamma * (1-done) * discounted_reward
+        #     returns.append(discounted_reward)
+        # returns = torch.FloatTensor(returns[::-1]).view(-1, 1).to(self.device) # [update_timesteps, 1]
+        # returns = (returns - returns.mean()) / (returns.std() + 1e-5)
 
         for _ in range(self.k_epoch):
             logprobs, state_values, entropies = self.model.evaluate(states_old, actions_old)
@@ -142,16 +159,17 @@ env = gym.make('CartPole-v0')
 n_state = env.observation_space.shape[0]
 n_action = env.action_space.n
 n_hidden = 64
-gamma = 0.99
+gamma = 1.0
+gae_lambda = 0.95
 lr = 1e-3
 eps_clip = 0.20
-k_epoch = 10
+k_epoch = 4
 value_weight = 0.5
 entropy_weight = 0.01
 update_timesteps = 300
 
 agent = PPOAgent(n_state, n_action, n_hidden,
-                gamma=gamma, lr=lr, eps_clip=eps_clip, k_epoch=k_epoch,
+                gamma=gamma, gae_lambda=gae_lambda, lr=lr, eps_clip=eps_clip, k_epoch=k_epoch,
                 value_weight=value_weight, entropy_weight=entropy_weight)
 
 n_episode = 500
@@ -163,11 +181,11 @@ for episode in range(n_episode):
     state = env.reset()
     while True:
         timestep += 1
-        action, logprob = agent.act(state)
+        action, logprob, state_value = agent.act(state)
         next_state, reward, done, _ = env.step(action)
         scores[episode] += reward
 
-        agent.memory.add((state, action, reward, done, logprob))
+        agent.memory.add((state, action, reward, done, logprob, state_value))
 
         if timestep % update_timesteps == 0:
             agent.update()
